@@ -166,6 +166,7 @@ class ReasoningAgent:
                 continue
             return extract_final_answer(resp)
         return extract_final_answer(last)
+        
     # Technique 6: Decomposition (least-to-most)
     def decomposition(self, question: str) -> str:
         decomp_prompt = (
@@ -219,6 +220,7 @@ class ReasoningAgent:
             )
             return extract_final_answer(self._call_llm(followup, max_tokens=256))
         return extract_final_answer(resp)
+        
     #  Technique 8: PAL (Program-Aided Language Model)
     def pal(self, question: str, timeout_sec: int = 5) -> str:
         prompt = (
@@ -257,3 +259,76 @@ class ReasoningAgent:
                     pass
         return ""
 
+    # Classifier (feature-based, zero LLM calls)
+    @staticmethod
+    def _classify(question: str) -> str:
+        q = question.lower()
+        has_ctx_block = "context:" in q or q.count("\n") > 4
+        digit_count = len(re.findall(r"\d", q))
+        math_terms = bool(re.search(
+            r"\b(solve|compute|calculate|find|sum|product|average|percent|"
+            r"total|how many|how much|\$|%)\b", q
+        ))
+        logic_terms = bool(re.search(
+            r"\b(if |suppose|assume|either|which must|therefore|implies)\b", q
+        ))
+        long_q = len(question) > 600
+
+        if has_ctx_block and long_q:
+            return "multihop"
+        if digit_count >= 2 and math_terms:
+            return "math"
+        if logic_terms and not has_ctx_block:
+            return "logic"
+        if long_q:
+            return "multihop"
+        return "commonsense"
+
+    # Top-level controller
+    def answer(self, question: str) -> str:
+        """Route to the best technique; fall back gracefully on budget exhaustion."""
+        self.call_count = 0
+        try:
+            category = self._classify(question)
+
+            if category == "math":
+                if self._remaining() >= 2:
+                    try:
+                        out = self.pal(question)
+                        if out and re.search(r"\d", out):
+                            return out
+                    except RuntimeError:
+                        pass
+                if self._remaining() >= 4:
+                    return self.self_consistency(question)
+                if self._remaining() >= 2:
+                    return self.tool_augmented(question)
+                return self.chain_of_thought(question)
+
+            if category == "logic":
+                if self._remaining() >= 4:
+                    return self.tree_of_thought(question)
+                if self._remaining() >= 2:
+                    return self.self_refine(question)
+                return self.chain_of_thought(question)
+
+            if category == "multihop":
+                if self._remaining() >= 5:
+                    return self.decomposition(question)
+                if self._remaining() >= 4:
+                    return self.react(question)
+                if self._remaining() >= 2:
+                    return self.self_refine(question)
+                return self.chain_of_thought(question)
+
+            if self._remaining() >= 2:
+                return self.self_refine(question)
+            return self.chain_of_thought(question)
+
+        except RuntimeError:
+            try:
+                if self._remaining() >= 1:
+                    return self.chain_of_thought(question)
+            except Exception:
+                pass
+            return ""
