@@ -64,3 +64,107 @@ class ReasoningAgent:
             if s.strip().lower() == top:
                 return s
         return samples[0]
+
+    
+# Technique 3: Tree-of-Thought (shallow BFS) 
+    def tree_of_thought(self, question: str, breadth: int = 2) -> str:
+        init_prompt = (
+            f"Question: {question}\n\n"
+            f"Propose {breadth} distinct first-step approaches. "
+            f"Format:\n1. <approach>\n2. <approach>"
+        )
+        init = self._call_llm(init_prompt, temperature=0.7, max_tokens=256)
+        steps = re.findall(r"\d+[.):]\s*(.+?)(?=\n\d+[.):]|\n\n|$)", init, re.DOTALL)
+        steps = [s.strip() for s in steps if s.strip()]
+        if not steps:
+            steps = [init.strip()]
+
+        best_step, best_score = steps[0], -1
+        for step in steps[:breadth]:
+            if self._remaining() < 2:
+                break
+            eval_prompt = (
+                f"Question: {question}\n"
+                f"Proposed approach: {step}\n"
+                f"Rate promise on 1-10. Respond with only the integer."
+            )
+            score_resp = self._call_llm(eval_prompt, max_tokens=8)
+            m = re.search(r"\d+", score_resp)
+            score = int(m.group(0)) if m else 5
+            if score > best_score:
+                best_score, best_step = score, step
+
+        expand_prompt = (
+            f"Question: {question}\n"
+            f"Use this approach: {best_step}\n"
+            f"Work through it fully and end with 'Answer: <final answer>'."
+        )
+        return extract_final_answer(self._call_llm(expand_prompt, max_tokens=1024))
+
+    # Technique 4: Self-Refine 
+    def self_refine(self, question: str) -> str:
+        initial = self.chain_of_thought(question)
+        if self._remaining() < 1:
+            return initial
+        critique_prompt = (
+            f"Question: {question}\n"
+            f"Draft answer: {initial}\n\n"
+            f"Carefully check the draft. If correct, restate it. "
+            f"If wrong, explain briefly and correct it. "
+            f"End with 'Answer: <final answer>'."
+        )
+        refined = self._call_llm(critique_prompt, max_tokens=512)
+        return extract_final_answer(refined)
+
+    # Technique 5: ReAct (iterative Thought/Action/Observation) 
+    def _safe_eval(self, expr: str) -> Optional[float]:
+        allowed = {
+            "abs": abs, "round": round, "min": min, "max": max, "pow": pow,
+            "sqrt": math.sqrt, "log": math.log, "log10": math.log10,
+            "exp": math.exp, "sin": math.sin, "cos": math.cos, "tan": math.tan,
+            "pi": math.pi, "e": math.e,
+        }
+        try:
+            tree = ast.parse(expr.strip(), mode="eval")
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Call):
+                    if getattr(n.func, "id", None) not in allowed:
+                        return None
+                elif isinstance(n, ast.Name) and n.id not in allowed:
+                    return None
+                elif isinstance(n, ast.Attribute):
+                    return None
+            return eval(compile(tree, "<string>", "eval"),
+                        {"__builtins__": {}}, allowed)
+        except Exception:
+            return None
+
+    def react(self, question: str, max_steps: int = 4) -> str:
+        history = (
+            f"Question: {question}\n\n"
+            f"Solve by alternating Thought -> Action -> Observation.\n"
+            f"Available actions:\n"
+            f"  CALC[<expr>]  - evaluate arithmetic, e.g. CALC[2*3+4]\n"
+            f"  FINISH[<ans>] - output the final answer\n"
+            f"Use at most {max_steps} steps. Begin now.\n"
+        )
+        last = ""
+        for _ in range(max_steps):
+            if self._remaining() < 1:
+                break
+            
+            resp = self._call_llm(history, temperature=0.0, max_tokens=512)
+            last = resp
+            m_fin = re.search(r"FINISH\[(.+?)\]", resp, re.DOTALL)
+            if m_fin:
+                return m_fin.group(1).strip()
+            m_calc = re.search(r"CALC\[([^\]]+)\]", resp)
+            if m_calc:
+                expr = m_calc.group(1).strip()
+                result = self._safe_eval(expr)
+                history += f"\n{resp}\nObservation: {expr} = {result}\n"
+                continue
+            return extract_final_answer(resp)
+        return extract_final_answer(last)
+
+
