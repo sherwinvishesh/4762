@@ -78,8 +78,8 @@ Each file's role:
 Clone the repo, create a virtual environment, and install dependencies:
 
 ```bash
-git clone 
-cd 
+git clone https://github.com/sherwinvishesh/General-Purpose-Reasoning-Agent.git
+cd General-Purpose-Reasoning-Agent
 python3 -m venv .venv
 source .venv/bin/activate        # on Windows: .venv\Scripts\activate
 pip install requests python-dotenv
